@@ -22,7 +22,7 @@ import torch
 import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_resampler.builder import build_vision_resampler
-from .multimodal_projector.builder import build_vision_projector
+from .multimodal_projector.builder import build_vision_projector, dense_connector 
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
@@ -168,6 +168,11 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    def is_siglip(self):
+        if 'siglip' in self.get_model().vision_tower_name.lower():
+            return True
+        return False
+
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.get_vision_tower().num_patches_per_side
         num_frames, num_tokens, num_dim = image_feature.shape
@@ -191,6 +196,11 @@ class LlavaMetaForCausalLM(ABC):
 
     def encode_images(self, images):
         image_features = self.get_model().get_vision_tower()(images)
+        # dense_connector 
+        # if self.get_model().config.mm_dense_connector_type in ['sti', 'sci', 'dci']:
+        #image_features = dense_connector(image_features, image_forward_outs, self.is_siglip(), self.get_model().config.mm_dense_connector_type)
+        image_features = dense_connector(image_features, image_forward_outs, self.is_siglip(), 'dci') # self.get_model().config.mm_dense_connector_type)
+
         # image_features = self.get_model().vision_resampler(image_features, images=images)
         image_features = self.get_model().mm_projector(image_features)
         return image_features
