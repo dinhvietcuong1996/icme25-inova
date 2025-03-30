@@ -21,6 +21,9 @@ import re
 from PIL import Image
 import math
 
+multichoice_letters = ["a", "b", "c", "d", "e", "f", "g", "h"]
+multichoice_letters = [c.upper() for c in multichoice_letters]
+
 def split_list(lst, n):
     """Split a list into n (roughly) equal-sized chunks"""
     chunk_size = math.ceil(len(lst) / n)  # integer division
@@ -110,6 +113,88 @@ def load_data(args):
         questions.extend(cur_questions)
     return questions
 
+def predict_single_question(model, line, ans_file):
+    model_name, tokenizer, model, image_processor, context_len = model
+
+    idx = line["sample_id"]
+    dataset_name = line["metadata"]["dataset"]
+    ground_truth = line["response"]
+    question_type = line['metadata']['question_type']
+
+    image_files = line['task_instance']['images_path']
+    ques_text = line['task_instruction']
+    ques_text += "\n" + line['task_instance']['context']
+    if "choice_list" in line['task_instance']:
+        ques_text+= "\nChoice List:\n"
+        for choice_letter, choice_text in zip(multichoice_letters, line['task_instance']['choice_list']):
+            ques_text += choice_letter + ": " + choice_text + "\n"
+            if choice_text == line["response"]:
+                ground_truth = choice_letter
+        
+        ques_text += "Answer with the option's letter from the given choices directly."
+
+    ques_text = re.sub(r'\{image#\d+\}', '<image>', ques_text)
+    args.conv_mode = "qwen_1_5"
+    conv = conv_templates[args.conv_mode].copy()
+    conv.append_message(conv.roles[0], ques_text)
+    conv.append_message(conv.roles[1], None)
+    
+    cur_prompt = conv.get_prompt()
+
+    input_ids = preprocess_qwen([{'from': 'human','value': ques_text},
+                                    {'from': 'gpt','value': None}], 
+                                tokenizer, has_image=True).cuda()
+    img_num = list(input_ids.squeeze()).count(IMAGE_TOKEN_INDEX)
+
+    try:
+        image_tensors = []
+        for image_file in image_files:
+            image = Image.open(image_file)
+            image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values']
+            image_tensors.append(image_tensor.half().cuda())
+        # image_tensors = torch.cat(image_tensors, dim=0)
+    except:
+        return
+
+    stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
+    keywords = [stop_str]
+    stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
+    with torch.inference_mode():
+        output_ids = model.generate(
+            input_ids,
+            images=image_tensors,
+            do_sample=True if args.temperature > 0 else False,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            num_beams=args.num_beams,
+            # no_repeat_ngram_size=3,
+            max_new_tokens=1024,
+            use_cache=True)
+
+    outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+    outputs = outputs.strip()
+    if outputs.endswith(stop_str):
+        outputs = outputs[:-len(stop_str)]
+    outputs = outputs.strip()
+
+    ans_id = shortuuid.uuid()
+    ans_file.write(json.dumps({
+                            "dataset": dataset_name,
+                            "sample_id": idx,
+                            "prompt": cur_prompt,
+                            "pred_response": outputs,
+                            "gt_response": ground_truth,
+                            "shortuuid": ans_id,
+                            "model_id": model_name,
+                            "question_type": question_type,
+                            }) + "\n")
+    ans_file.flush()
+
+    del input_ids
+    del image_tensors
+    del output_ids
+    torch.cuda.empty_cache()
+
 def eval_model(args):
     disable_torch_init()
     model_path = os.path.expanduser(args.model_path)
@@ -118,85 +203,13 @@ def eval_model(args):
     
     questions = load_data(args)
 
-    multichoice_letters = ["a", "b", "c", "d", "e", "f", "g", "h"]
-    multichoice_letters = [c.upper() for c in multichoice_letters]
+    
     
     ans_file = open(args.answers_file, "w")
     
     for line in tqdm(questions):
-        idx = line["sample_id"]
-        dataset_name = line["metadata"]["dataset"]
-        ground_truth = line["response"]
-        question_type = line['metadata']['question_type']
-    
-        image_files = line['task_instance']['images_path']
-        ques_text = line['task_instruction']
-        ques_text += "\n" + line['task_instance']['context']
-        if "choice_list" in line['task_instance']:
-            ques_text+= "\nChoice List:\n"
-            for choice_letter, choice_text in zip(multichoice_letters, line['task_instance']['choice_list']):
-                ques_text += choice_letter + ": " + choice_text + "\n"
-                if choice_text == line["response"]:
-                    ground_truth = choice_letter
-            
-            ques_text += "Answer with the option's letter from the given choices directly."
-
-        ques_text = re.sub(r'\{image#\d+\}', '<image>', ques_text)
-        args.conv_mode = "qwen_1_5"
-        conv = conv_templates[args.conv_mode].copy()
-        conv.append_message(conv.roles[0], ques_text)
-        conv.append_message(conv.roles[1], None)
+        predict_single_question((model_name, tokenizer, model, image_processor, context_len), line, ans_file)
         
-        cur_prompt = conv.get_prompt()
-
-        input_ids = preprocess_qwen([{'from': 'human','value': ques_text},
-                                     {'from': 'gpt','value': None}], 
-                                    tokenizer, has_image=True).cuda()
-        img_num = list(input_ids.squeeze()).count(IMAGE_TOKEN_INDEX)
-
-        try:
-            image_tensors = []
-            for image_file in image_files:
-                image = Image.open(image_file)
-                image_tensor = image_processor.preprocess(image, return_tensors='pt')['pixel_values']
-                image_tensors.append(image_tensor.half().cuda())
-            # image_tensors = torch.cat(image_tensors, dim=0)
-        except:
-            continue
-
-        stop_str = conv.sep if conv.sep_style != SeparatorStyle.TWO else conv.sep2
-        keywords = [stop_str]
-        stopping_criteria = KeywordsStoppingCriteria(keywords, tokenizer, input_ids)
-        with torch.inference_mode():
-            output_ids = model.generate(
-                input_ids,
-                images=image_tensors,
-                do_sample=True if args.temperature > 0 else False,
-                temperature=args.temperature,
-                top_p=args.top_p,
-                num_beams=args.num_beams,
-                # no_repeat_ngram_size=3,
-                max_new_tokens=1024,
-                use_cache=True)
-
-        outputs = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
-        outputs = outputs.strip()
-        if outputs.endswith(stop_str):
-            outputs = outputs[:-len(stop_str)]
-        outputs = outputs.strip()
-
-        ans_id = shortuuid.uuid()
-        ans_file.write(json.dumps({
-                                "dataset": dataset_name,
-                                "sample_id": idx,
-                                "prompt": cur_prompt,
-                                "pred_response": outputs,
-                                "gt_response": ground_truth,
-                                "shortuuid": ans_id,
-                                "model_id": model_name,
-                                "question_type": question_type,
-                                }) + "\n")
-        ans_file.flush()
 
 
 if __name__ == "__main__":
