@@ -100,8 +100,9 @@ def load_data(args):
     
         with open(data_file_path, "rt") as infile:
             data = json.load(infile)
-    
-        cur_questions = get_chunk(data['data'], args.num_chunks, args.chunk_idx)
+
+        cur_questions = data['data']
+        # cur_questions = get_chunk(data['data'], args.num_chunks, args.chunk_idx)
         for ques in cur_questions:
             ques['task_instruction'] =  data['metadata']['task_instruction'][ques["task_instruction_id"]]
             ques['metadata'] = {}
@@ -128,8 +129,8 @@ def predict_single_question(model, line, ans_file):
         ques_text+= "\nChoice List:\n"
         for choice_letter, choice_text in zip(multichoice_letters, line['task_instance']['choice_list']):
             ques_text += choice_letter + ": " + choice_text + "\n"
-            if choice_text == line["response"]:
-                ground_truth = choice_letter
+            # if choice_text == line["response"]:
+            #     ground_truth = choice_letter
         
         ques_text += "Answer with the option's letter from the given choices directly."
 
@@ -177,6 +178,13 @@ def predict_single_question(model, line, ans_file):
         outputs = outputs[:-len(stop_str)]
     outputs = outputs.strip()
 
+    if "choice_list" in line['task_instance']:
+        choice_list = line['task_instance']['choice_list']
+        if outputs in multichoice_letters:
+            outputs = choice_list[multichoice_letters.index(outputs.upper())]
+
+
+
     ans_id = shortuuid.uuid()
     ans_file.write(json.dumps({
                             "dataset": dataset_name,
@@ -204,7 +212,11 @@ def eval_model(args):
     questions = load_data(args)
 
     
-    
+    directory = os.path.dirname(args.answers_file)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory)
+
+    print(f"Saving answers to {args.answers_file}")
     ans_file = open(args.answers_file, "w")
     
     for line in tqdm(questions):

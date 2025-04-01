@@ -176,9 +176,9 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    args.result_dir = "result_dir"
     if not os.path.exists(args.result_dir):
         os.mkdir(args.result_dir)
+    print('Writing results to {}'.format(args.result_dir))
     
     preds_all = read_jsonl_file(args.answers_file)
     
