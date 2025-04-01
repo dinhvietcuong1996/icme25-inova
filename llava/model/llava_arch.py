@@ -23,6 +23,7 @@ import torch.nn as nn
 from .multimodal_encoder.builder import build_vision_tower
 from .multimodal_resampler.builder import build_vision_resampler
 from .multimodal_projector.builder import build_vision_projector
+from .multimodal_projector.dense_connector import dense_connector
 
 from llava.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 
@@ -37,6 +38,7 @@ class LlavaMetaModel:
         super(LlavaMetaModel, self).__init__(config)
 
         if hasattr(config, "mm_vision_tower"):
+            self.vision_tower_name = getattr(config, 'mm_vision_tower', getattr(config, 'vision_tower', None))
             delay_load = getattr(config, "delay_load", False)
             self.vision_tower = build_vision_tower(config, delay_load=delay_load)
             self.vision_resampler = build_vision_resampler(config, vision_tower=self.vision_tower)
@@ -88,7 +90,13 @@ class LlavaMetaModel:
 
         self.config.use_mm_proj = True
         self.config.mm_projector_type = getattr(model_args, "mm_projector_type", "linear")
+        self.config.mm_dense_connector_type = model_args.mm_dense_connector_type
         self.config.mm_hidden_size = getattr(vision_resampler, "hidden_size", vision_tower.hidden_size)
+        print("mm_dense_connector_type", self.config.mm_dense_connector_type)
+        if model_args.mm_dense_connector_type == 'sci' or model_args.mm_dense_connector_type == 'dci':
+            self.config.mm_hidden_size = self.config.mm_hidden_size * 3
+        else:
+            self.config.mm_hidden_size = self.config.mm_hidden_size 
         self.config.mm_vision_select_layer = mm_vision_select_layer
         self.config.mm_vision_select_feature = mm_vision_select_feature
         self.config.mm_patch_merge_type = mm_patch_merge_type
@@ -168,6 +176,11 @@ class LlavaMetaForCausalLM(ABC):
     def get_vision_tower(self):
         return self.get_model().get_vision_tower()
 
+    def is_siglip(self):
+        if 'siglip' in self.get_model().vision_tower_name.lower():
+            return True
+        return False
+
     def get_2dPool(self, image_feature, stride=2):
         height = width = self.get_vision_tower().num_patches_per_side
         num_frames, num_tokens, num_dim = image_feature.shape
@@ -190,8 +203,12 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
     def encode_images(self, images):
-        image_features = self.get_model().get_vision_tower()(images)
+        image_features, image_forward_outs = self.get_model().get_vision_tower()(images, return_image_forward_outs=True)
         # image_features = self.get_model().vision_resampler(image_features, images=images)
+        # dense connector
+        if self.get_model().config.mm_dense_connector_type in ['sti', 'sci', 'dci']:
+            image_features = dense_connector(image_features, image_forward_outs, self.is_siglip(), self.get_model().config.mm_dense_connector_type)
+
         image_features = self.get_model().mm_projector(image_features)
         return image_features
     

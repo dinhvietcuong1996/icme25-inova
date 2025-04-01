@@ -34,6 +34,7 @@ from transformers import Qwen2Config, Qwen2Model, Qwen2ForCausalLM
 
 class LlavaQwenConfig(Qwen2Config):
     model_type = "llava_qwen"
+    mm_dense_connector_type = None
 
 
 class LlavaQwenModel(LlavaMetaModel, Qwen2Model):
