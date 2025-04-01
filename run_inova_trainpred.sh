@@ -26,19 +26,22 @@ python inova_train.py \
     --num_train_epochs 1 \
     --per_device_train_batch_size 1 \
     --per_device_eval_batch_size 1 \
-    --gradient_accumulation_steps 4 \
+    --gradient_accumulation_steps 1 \
+    --bf16 True \
+    --tf32 True \
     --evaluation_strategy "no" \
-    --save_strategy "no" \
-    --save_steps 5000 \
+    --save_strategy "steps" \
+    --save_steps 1000 \
+    --save_total_limit 1 \
     --mm_tunable_parts="mm_vision_tower,mm_mlp_adapter,mm_language_model" \
-    --mm_vision_tower_lr=2e-6 \
-    --learning_rate 1e-5 \
-    --weight_decay 0. \
+    --learning_rate 2e-5 \
+    --weight_decay 0.0 \
     --warmup_ratio 0.03 \
     --lr_scheduler_type "cosine" \
     --report_to wandb \
+    --model_max_length 4096 \
     --run_name ${MODEL}_${COMMENT}_${DATE} \
-    --logging_steps 100 \
+    --logging_steps 10 \
     --mm_dense_connector_type "dci"
 
 

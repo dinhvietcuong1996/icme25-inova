@@ -157,7 +157,6 @@ class TrainingArguments(transformers.TrainingArguments):
     gradient_checkpointing: bool = field(default=True)
     verbose_logging: bool = field(default=False)
     attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
-    bf16: int = field(default=True)
 
     # training_args.overwrite_output_dir = True
     # training_args.do_train = True
@@ -711,6 +710,20 @@ def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: st
         del state_dict
         trainer._save(output_dir, state_dict=cpu_state_dict)  # noqa
 
+def find_all_linear_names(model):
+    cls = torch.nn.Linear
+    lora_module_names = set()
+    multimodal_keywords = ["mm_projector", "vision_tower", "vision_resampler"]
+    for name, module in model.named_modules():
+        if any(mm_keyword in name for mm_keyword in multimodal_keywords):
+            continue
+        if isinstance(module, cls):
+            names = name.split(".")
+            lora_module_names.add(names[0] if len(names) == 1 else names[-1])
+
+    if "lm_head" in lora_module_names:  # needed for 16-bit
+        lora_module_names.remove("lm_head")
+    return list(lora_module_names)
 
 def train():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
@@ -757,6 +770,12 @@ def train():
 
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
+    if model_args.mm_dense_connector_type == 'sci' or model_args.mm_dense_connector_type == 'dci':
+        print("Reinitialize mm_projector...")
+        model.model.config.mm_hidden_size = model.model.config.mm_hidden_size * 3
+        from llava.model.multimodal_projector.builder import build_vision_projector
+        model.model.mm_projector = build_vision_projector(config=model.model.config, vision_cfg=model.get_vision_tower().config)
+
     if training_args.lora_enable:
         from peft import LoraConfig, get_peft_model
 
@@ -797,17 +816,19 @@ def train():
         else:
             conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
 
-    if model_args.mm_dense_connector_type == 'sci' or model_args.mm_dense_connector_type == 'dci':
-        print("Reinitialize mm_projector...")
-        model.model.config.mm_hidden_size = model.model.config.mm_hidden_size * 3
-        from llava.model.multimodal_projector.builder import build_vision_projector
-        model.model.mm_projector = build_vision_projector(config=model.model.config, vision_cfg=model.get_vision_tower().config)
+    
 
     data_args.image_processor = model.get_vision_tower().image_processor
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
 
     print("Model architecture: ")
     print(model)
+
+    # Print all trainable variables of the model
+    rank0_print("Trainable parameters:")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            rank0_print(f"{name}: {param.size()}")
 
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
 
